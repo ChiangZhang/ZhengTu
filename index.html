@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>征途 Battle 3v3</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>征途 Battle 3v3</h1>
+        <div class="info-bar">
+            <div>回合: <span id="iRound">1</span></div>
+            <div>当前: <span id="iName">-</span></div>
+            <div>HP: <span id="iHp">-</span></div>
+            <div>护盾: <span id="iShield">-</span></div>
+            <div>牌堆: <span id="iDeck">-</span></div>
+        </div>
+        <div class="unit-cards-bar" id="unitCardsBar"></div>
+        <div class="phase-bar">阶段: <span class="phase-name" id="phaseName">等待</span></div>
+        <div class="map-wrap"><div id="map" class="map"></div></div>
+        <div class="actions">
+            <button id="btnMove">移动</button>
+            <button id="btnPlay">出牌</button>
+            <button id="btnEnd">结束回合</button>
+            <button id="btnCancel" style="display:none">取消</button>
+        </div>
+        <div class="hand-label">手牌</div>
+        <div id="hand" class="hand"></div>
+        <div class="log" id="log"></div>
+    </div>
+
+    <!-- 装备替换弹窗 -->
+    <div id="equipReplaceModal" class="modal hidden">
+        <div class="modal-content">
+            <h2>⚔️ 装备栏已满</h2>
+            <p>要装备 <strong id="equipReplaceNewName"></strong>，请选择弃掉哪件装备：</p>
+            <div id="equipReplaceList" style="margin:10px 0"></div>
+            <button style="background:#555;margin-top:4px" onclick="equipReplaceChoice(-1)">取消</button>
+        </div>
+    </div>
+
+    <!-- 队友信息弹窗 -->
+    <div id="teammateModal" class="modal hidden">
+        <div class="modal-content" style="min-width:400px;max-width:600px">
+            <h2 id="teammateTitle">队友信息</h2>
+            <p style="font-size:12px;color:#aaa;margin-bottom:6px">装备栏</p>
+            <div id="teammateEquips" style="margin-bottom:12px"></div>
+            <p style="font-size:12px;color:#aaa;margin-bottom:6px">手牌</p>
+            <div id="teammateHand" style="display:flex;gap:5px;justify-content:center;flex-wrap:wrap;margin-bottom:12px"></div>
+            <button style="background:#555;margin-top:4px" onclick="closeTeammateModal()">关闭</button>
+        </div>
+    </div>
+
+    <!-- 火炬融合弹窗 -->
+    <div id="torchModal" class="modal hidden">
+        <div class="modal-content">
+            <h2>🔥 火炬使用方式</h2>
+            <p>选择火炬的使用方式：融合到铁剑（伤害+1000）或投掷到地图上</p>
+            <button id="torchFuseBtn" style="background:#e67e22;margin:4px;min-width:120px" onclick="torchChoice('fuse')">🗡️ 融合铁剑</button>
+            <button style="background:#c0392b;margin:4px;min-width:120px" onclick="torchChoice('throw')">💥 投掷地图</button>
+            <button style="background:#555;margin:4px;min-width:120px" onclick="torchChoice('cancel')">取消</button>
+        </div>
+    </div>
+
+    <!-- 控制弹窗（动态图标+读条） -->
+    <div id="controlModal" class="modal hidden">
+        <div class="modal-content">
+            <h2 id="controlTitle">🧊 受到控制！</h2>
+            <p id="controlText"></p>
+            <div id="controlCards"></div>
+            <div class="reaction-timer-bar"><div class="reaction-timer-fill" id="controlTimerFill"></div></div>
+            <button style="background:#e74c3c;margin-top:4px" onclick="controlChoice(false)">不使用免疫</button>
+        </div>
+    </div>
+
+    <!-- 火焰伤害弹窗（读条） -->
+    <div id="fireModal" class="modal hidden">
+        <div class="modal-content">
+            <h2>🔥 火焰灼烧！</h2>
+            <p id="fireText"></p>
+            <div id="fireCards"></div>
+            <div class="reaction-timer-bar"><div class="reaction-timer-fill" id="fireTimerFill"></div></div>
+            <button style="background:#e74c3c;margin-top:4px" onclick="fireChoice(false)">不格挡</button>
+        </div>
+    </div>
+
+    <!-- 濒死弹窗（读条） -->
+    <div id="dyingModal" class="modal hidden">
+        <div class="modal-content">
+            <h2>⚠️ 濒死求援！</h2>
+            <p id="dyingText"></p>
+            <div id="dyingCards"></div>
+            <div class="reaction-timer-bar"><div class="reaction-timer-fill" id="dyingTimerFill"></div></div>
+            <button style="background:#e74c3c;margin-top:4px" onclick="dyingChoice(false)">无人救援</button>
+        </div>
+    </div>
+
+    <!-- 防御弹窗（读条） -->
+    <div id="defendModal" class="modal hidden">
+        <div class="modal-content">
+            <h2>⚠️ 遭到攻击！</h2>
+            <p id="defendText"></p>
+            <div class="defend-cards" id="defendCards"></div>
+            <div class="reaction-timer-bar"><div class="reaction-timer-fill" id="defendTimerFill"></div></div>
+            <button style="background:#e74c3c" onclick="defendChoice(false)">不防御</button>
+        </div>
+    </div>
+
+    <!-- 胜利弹窗 -->
+    <div id="victoryModal" class="modal hidden">
+        <div class="modal-content">
+            <h2>🎉 胜利！</h2>
+            <p>所有敌人已被击败!</p>
+            <button style="background:#f0c040;color:#000" onclick="restart()">再来一局</button>
+        </div>
+    </div>
+
+    <!-- 失败弹窗 -->
+    <div id="defeatModal" class="modal hidden">
+        <div class="modal-content">
+            <h2>💀 失败</h2>
+            <p>我方全军覆没!</p>
+            <button style="background:#f0c040;color:#000" onclick="restart()">再来一局</button>
+        </div>
+    </div>
+
+    <script src="game.js"></script>
+</body>
+</html>
