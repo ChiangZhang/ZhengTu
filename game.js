@@ -95,6 +95,77 @@ function stopReactionTimer() {
     reactionTimer.barEl = null; reactionTimer.onExpire = null;
 }
 
+// ========== 玩家回合计时器（30秒） ==========
+const TURN_TIME = 30000;
+let turnTimer = { rafId: null, startTime: 0 };
+
+function ensureTurnTimerBar() {
+    if (document.getElementById("turnTimerBar")) return;
+    let bar = document.createElement("div");
+    bar.id = "turnTimerBar";
+    bar.style.cssText = "width:100%;height:10px;background:#222;border-radius:5px;margin:6px 0;overflow:hidden;display:flex;justify-content:center;align-items:center;position:relative;";
+    let fill = document.createElement("div");
+    fill.id = "turnTimerFill";
+    fill.style.cssText = "height:100%;background:linear-gradient(90deg,#e6a817,#f0c040,#f5d060,#f0c040,#e6a817);border-radius:5px;width:100%;box-shadow:0 0 8px #f0c04066;";
+    bar.appendChild(fill);
+    let phaseBar = document.querySelector(".phase-bar");
+    if (phaseBar) phaseBar.parentNode.insertBefore(bar, phaseBar.nextSibling);
+}
+
+function startTurnTimer(duration) {
+    stopTurnTimer();
+    ensureTurnTimerBar();
+    let barEl = document.getElementById("turnTimerFill");
+    let container = document.getElementById("turnTimerBar");
+    if (!barEl || !container) return;
+    container.style.display = "flex";
+    barEl.style.width = "100%";
+    turnTimer.startTime = Date.now();
+    let dur = duration || TURN_TIME;
+
+    function tick() {
+        let elapsed = Date.now() - turnTimer.startTime;
+        let ratio = Math.max(0, 1 - elapsed / dur);
+        let barEl = document.getElementById("turnTimerFill");
+        if (barEl) barEl.style.width = (ratio * 100) + "%";
+        if (ratio <= 0) {
+            stopTurnTimer();
+            forceEndPlayerTurn();
+            return;
+        }
+        turnTimer.rafId = requestAnimationFrame(tick);
+    }
+    turnTimer.rafId = requestAnimationFrame(tick);
+}
+
+function stopTurnTimer() {
+    if (turnTimer.rafId) { cancelAnimationFrame(turnTimer.rafId); turnTimer.rafId = null; }
+    let container = document.getElementById("turnTimerBar");
+    if (container) container.style.display = "none";
+}
+
+function forceEndPlayerTurn() {
+    let u = cur();
+    if (!u.isPlayer || u.hp <= 0) return;
+    // 取消所有选择状态
+    selectedCard = null;
+    pendingTorchCard = null;
+    pendingEquipCard = null;
+    // 关闭玩家操作弹窗
+    document.getElementById("torchModal").classList.add("hidden");
+    document.getElementById("equipReplaceModal").classList.add("hidden");
+    while (u.hand.length > 5) {
+        let ri = Math.floor(Math.random() * u.hand.length);
+        let removed = u.hand.splice(ri, 1)[0];
+        addLog(`⏰ 随机弃掉了${removed.name}`);
+    }
+    phase = "idle";
+    addLog("⏰ 时间到！回合强制结束");
+    u.effects = u.effects.filter(e => { if (e.type==="freeze"||e.type==="vine") { e.turns--; return e.turns>0; } return true; });
+    nextTurnIdx();
+    startTurn();
+}
+
 // ========== 角色初始化 ==========
 function initUnits() {
     let u = [
@@ -105,21 +176,21 @@ function initUnits() {
         { name:"敌人2", team:"enemy",  row:0, col:2, hp:5000, maxHp:5000, shield:0, hand:[], equips:[], effects:[], isPlayer:false, torchBoosted:false },
         { name:"敌人3", team:"enemy",  row:1, col:3, hp:5000, maxHp:5000, shield:0, hand:[], equips:[], effects:[], isPlayer:false, torchBoosted:false },
     ];
-    
+
     u.forEach(x => drawFromPile(x, 5));
     return u;
-    
+
     /*
     // 玩家：测试
     u[0].hand = [
-        makeCard("card_name"), makeCard("card_name"), makeCard("card_name"),
-        makeCard("card_name"), makeCard("card_name"),
+        makeCard("torch"), makeCard("torch"), makeCard("block"),
+        makeCard("torch"), makeCard("torch"),
     ];
     // 敌人：测试
     u.filter(x => x.team === "enemy").forEach(x => {
         x.hand = [
-            makeCard("card_name"), makeCard("card_name"), makeCard("card_name"),
-            makeCard("card_name"), makeCard("card_name"),
+            makeCard("iron_sword"), makeCard("iron_sword"), makeCard("iron_sword"),
+            makeCard("freeze"), makeCard("freeze"),
         ];
     });
     return u;
@@ -135,13 +206,166 @@ let pendingTorchCard = null;
 let pendingEquipCard = null;
 let logLines = [];
 
+// ========== AI行动队列系统（修复弹窗冲突） ==========
+let aiActionQueue = [];
+let aiContinuation = null;
+
+function isModalOpen() {
+    const ids = ["defendModal", "controlModal", "fireModal", "dyingModal"];
+    return ids.some(id => !document.getElementById(id).classList.contains("hidden"));
+}
+
+function continueAIAfterModal() {
+    if (aiContinuation) {
+        let cont = aiContinuation;
+        aiContinuation = null;
+        setTimeout(cont, 400);
+    } else if (!cur().isPlayer) {
+        setTimeout(endTurn, 400);
+    }
+}
+
+function executeNextAIAction(u) {
+    while (aiActionQueue.length > 0) {
+        let action = aiActionQueue.shift();
+        action();
+        draw();
+        if (isModalOpen()) {
+            aiContinuation = () => executeNextAIAction(u);
+            return;
+        }
+    }
+    if (!isModalOpen()) {
+        setTimeout(endTurn, 400);
+    }
+}
+
+// ========== 猜拳系统 ==========
+let rpsState = { isStart1: false, friendWins: false };
+
+function ensureRPSModals() {
+    if (document.getElementById("rpsChoiceModal")) return;
+    let cm = document.createElement("div");
+    cm.id = "rpsChoiceModal"; cm.className = "modal hidden";
+    cm.innerHTML = `<div class="modal-content">
+        <h2>✊✂️✋ 猜拳决定先攻！</h2>
+        <p id="rpsMatchup" style="font-size:16px;margin-bottom:12px"></p>
+        <div>
+            <button style="background:#c0392b;margin:6px;min-width:100px;font-size:18px;padding:12px 20px" onclick="playerRPSChoice('石头')">✊ 石头</button>
+            <button style="background:#2980b9;margin:6px;min-width:100px;font-size:18px;padding:12px 20px" onclick="playerRPSChoice('剪刀')">✂️ 剪刀</button>
+            <button style="background:#27ae60;margin:6px;min-width:100px;font-size:18px;padding:12px 20px" onclick="playerRPSChoice('布')">✋ 布</button>
+        </div>
+        <p id="rpsTieHint" style="color:#e67e22;font-size:13px;margin-top:8px;min-height:18px"></p>
+    </div>`;
+    document.body.appendChild(cm);
+    let rm = document.createElement("div");
+    rm.id = "rpsResultModal"; rm.className = "modal hidden";
+    rm.innerHTML = `<div class="modal-content">
+        <h2>✊✂️✋ 猜拳结果</h2>
+        <p id="rpsResultText" style="font-size:22px;margin:12px 0"></p>
+        <p id="rpsResultWinner" style="font-size:16px;font-weight:bold;color:#f0c040;margin:8px 0"></p>
+        <p id="rpsResultOrder" style="font-size:12px;color:#aaa;margin:6px 0"></p>
+        <button style="background:#f0c040;color:#000;margin-top:10px;padding:10px 24px;font-size:14px" onclick="rpsResultConfirm()">开始游戏</button>
+    </div>`;
+    document.body.appendChild(rm);
+}
+
+function startRPS() {
+    ensureRPSModals();
+    rpsState.isStart1 = Math.random() < 0.5;
+    if (rpsState.isStart1) {
+        addLog("🎲 抽签：玩家1 vs 敌人1 猜拳决定先攻！");
+        document.getElementById("rpsMatchup").textContent = "玩家1 vs 敌人1 —— 请出拳！";
+        document.getElementById("rpsTieHint").textContent = "";
+        document.getElementById("rpsChoiceModal").classList.remove("hidden");
+    } else {
+        addLog("🎲 抽签：队友3 vs 敌人3 猜拳决定先攻！");
+        doAIRPS();
+    }
+}
+
+function rpsWins(a, b) {
+    return (a==="石头"&&b==="剪刀")||(a==="剪刀"&&b==="布")||(a==="布"&&b==="石头");
+}
+
+function rpsIcon(c) { return {"石头":"✊","剪刀":"✂️","布":"✋"}[c]; }
+
+function doAIRPS() {
+    let ch = ["石头","剪刀","布"];
+    let fC, eC;
+    do {
+        fC = ch[Math.floor(Math.random()*3)];
+        eC = ch[Math.floor(Math.random()*3)];
+        if (fC === eC) addLog(`  队友3 ${rpsIcon(fC)}${fC} vs 敌人3 ${rpsIcon(eC)}${eC} —— 平局！重来`);
+    } while (fC === eC);
+    addLog(`  队友3 ${rpsIcon(fC)}${fC} vs 敌人3 ${rpsIcon(eC)}${eC}`);
+    rpsState.friendWins = rpsWins(fC, eC);
+    showRPSResult("队友3", fC, "敌人3", eC, rpsState.friendWins);
+}
+
+function playerRPSChoice(choice) {
+    let ch = ["石头","剪刀","布"];
+    let eC = ch[Math.floor(Math.random()*3)];
+    addLog(`  玩家1 ${rpsIcon(choice)}${choice} vs 敌人1 ${rpsIcon(eC)}${eC}` + (choice===eC?" —— 平局！重来":""));
+    if (choice === eC) {
+        document.getElementById("rpsTieHint").textContent = `双方都出了${rpsIcon(choice)}${choice}，平局！请重新出拳`;
+        return;
+    }
+    document.getElementById("rpsChoiceModal").classList.add("hidden");
+    rpsState.friendWins = rpsWins(choice, eC);
+    showRPSResult("玩家1", choice, "敌人1", eC, rpsState.friendWins);
+}
+
+function showRPSResult(fN, fC, eN, eC, fW) {
+    document.getElementById("rpsResultText").textContent = `${fN} ${rpsIcon(fC)}  vs  ${eN} ${rpsIcon(eC)}`;
+    if (fW) {
+        document.getElementById("rpsResultWinner").textContent = `🎉 ${fN}获胜！我方先攻！`;
+        addLog(`🎉 ${fN}赢了猜拳！我方先攻！`);
+    } else {
+        document.getElementById("rpsResultWinner").textContent = `😤 ${eN}获胜！敌方先攻！`;
+        addLog(`😤 ${eN}赢了猜拳！敌方先攻！`);
+    }
+    let orderNames = getOrderNames(rpsState.isStart1, fW);
+    document.getElementById("rpsResultOrder").textContent = "行动顺序：" + orderNames.join(" → ");
+    document.getElementById("rpsResultModal").classList.remove("hidden");
+}
+
+function getOrderNames(isStart1, friendWins) {
+    let f1="玩家1",f2="队友2",f3="队友3",e1="敌人1",e2="敌人2",e3="敌人3";
+    if (isStart1 && friendWins)       return [f1,e1,f3,e3,f2,e2];
+    else if (isStart1 && !friendWins) return [e1,f1,e3,f3,e2,f2];
+    else if (!isStart1 && friendWins) return [f3,e3,f1,e1,f2,e2];
+    else                              return [e3,f3,e1,f1,e2,f2];
+}
+
+function rpsResultConfirm() {
+    document.getElementById("rpsResultModal").classList.add("hidden");
+    arrangeUnits(rpsState.isStart1, rpsState.friendWins);
+    addLog(`=== 第1回合 ===`);
+    startTurn();
+}
+
+function arrangeUnits(isStart1, friendWins) {
+    // 原始: 0=玩家1, 1=队友2, 2=队友3, 3=敌人1, 4=敌人2, 5=敌人3
+    // 3开局: 赢3输3赢1输1赢2输2  |  1开局: 赢1输1赢3输3赢2输2
+    let order;
+    if (isStart1 && friendWins)       order = [0,3,2,5,1,4];
+    else if (isStart1 && !friendWins) order = [3,0,5,2,4,1];
+    else if (!isStart1 && friendWins) order = [2,5,0,3,1,4];
+    else                              order = [5,2,3,0,4,1];
+    units = order.map(i => units[i]);
+}
+
+// ========== 重启 ==========
 function restart() {
     round = 1; turnIdx = 0; phase = "idle"; selectedCard = null;
     hasMoved = false; hasAttacked = false;
     blockedCells = []; fireCells = [];
     pendingAttack = null; pendingDying = null; pendingFireDmg = null; pendingControl = null;
     pendingTorchCard = null; pendingEquipCard = null;
+    aiActionQueue = []; aiContinuation = null;
     stopReactionTimer();
+    stopTurnTimer();
     logLines = [];
     buildDrawPile();
     units = initUnits();
@@ -154,8 +378,10 @@ function restart() {
     document.getElementById("teammateModal").classList.add("hidden");
     document.getElementById("equipReplaceModal").classList.add("hidden");
     document.getElementById("defendModal").classList.add("hidden");
-    addLog("游戏开始！第1回合");
-    startTurn();
+    if (document.getElementById("rpsChoiceModal")) document.getElementById("rpsChoiceModal").classList.add("hidden");
+    if (document.getElementById("rpsResultModal")) document.getElementById("rpsResultModal").classList.add("hidden");
+    addLog("游戏开始！");
+    startRPS();
 }
 
 // ========== 工具函数 ==========
@@ -208,8 +434,8 @@ function getMoveTargets(u) {
 
 // ========== 渲染 ==========
 function draw() {
-    if (alive("enemy").length === 0) { document.getElementById("victoryModal").classList.remove("hidden"); return; }
-    if (alive("friend").length === 0) { document.getElementById("defeatModal").classList.remove("hidden"); return; }
+    if (alive("enemy").length === 0) { stopTurnTimer(); document.getElementById("victoryModal").classList.remove("hidden"); return; }
+    if (alive("friend").length === 0) { stopTurnTimer(); document.getElementById("defeatModal").classList.remove("hidden"); return; }
 
     let u = cur();
     document.getElementById("iRound").textContent = round;
@@ -567,13 +793,13 @@ function defendChoice(useDefense, cardId) {
             target.hand.splice(idx, 1);
             addLog(`${target.name}使用格挡抵消了攻击！`);
             pendingAttack = null; draw();
-            if (!cur().isPlayer) setTimeout(endTurn, 400); return;
+            continueAIAfterModal(); return;
         }
     }
     applyDamage(target, dmg, attacker);
     addLog(`${attacker.name}用${cardName}对${target.name}造成${dmg}伤害`);
     pendingAttack = null; draw();
-    if (!cur().isPlayer) setTimeout(endTurn, 400);
+    if (!pendingDying) continueAIAfterModal();
 }
 
 // ========== 控制结算（带读条+动态图标） ==========
@@ -628,7 +854,7 @@ function controlChoice(useImmunity) {
         if (idx >= 0) { target.hand.splice(idx, 1); addLog(`${target.name}使用免疫抵消了${name}！`); }
     } else { applyControl(attacker, target, type, name, desc); }
     pendingControl = null; draw();
-    if (!cur().isPlayer) setTimeout(endTurn, 400);
+    continueAIAfterModal();
 }
 
 // ========== 濒死求援 ==========
@@ -674,7 +900,7 @@ function dyingChoice(save, healer) {
     let wasFireDmg = pendingDying.fromFireDmg;
     pendingDying = null; draw();
     if (wasFireDmg) { continueStartTurn(cur()); return; }
-    if (!cur().isPlayer && cur().hp > 0) setTimeout(endTurn, 400);
+    continueAIAfterModal();
 }
 
 // ========== 火焰伤害（带读条） ==========
@@ -752,7 +978,11 @@ function continueStartTurn(u) {
         if (!isDrought && !u.noDrawNextTurn) drawFromPile(u, 2);
         if (u.noDrawNextTurn) { addLog(`🌿 ${u.name}被藤蔓缠绕，无法抽牌！`); u.noDrawNextTurn = false; }
     }
-    if (u.isPlayer) { addLog(`--- 你的回合 (第${round}回合) ---`); draw(); }
+    if (u.isPlayer) {
+        addLog(`--- 你的回合 (第${round}回合) ---`);
+        draw();
+        startTurnTimer();
+    }
     else { draw(); setTimeout(() => aiTurn(u), 600); }
 }
 
@@ -762,9 +992,10 @@ function nextTurnIdx() {
 }
 
 function endTurn() {
+    stopTurnTimer();
     let u = cur();
     u.effects = u.effects.filter(e => { if (e.type==="freeze"||e.type==="vine") { e.turns--; return e.turns>0; } return true; });
-    if (u.isPlayer && u.hand.length > 5) { phase = "discarding"; addLog(`手牌超过5张，请弃掉${u.hand.length-5}张牌`); draw(); return; }
+    if (u.isPlayer && u.hand.length > 5) { phase = "discarding"; addLog(`手牌超过5张，请弃掉${u.hand.length-5}张牌`); startTurnTimer(10000); draw(); return; }
     while (u.hand.length > 5) u.hand.pop();
     nextTurnIdx(); startTurn();
 }
@@ -773,10 +1004,10 @@ function discardCard(card) {
     let u = cur();
     if (phase !== "discarding") return;
     removeCard(u, card); addLog(`弃掉了${card.name}`);
-    if (u.hand.length <= 5) { phase = "idle"; addLog("弃牌完成"); nextTurnIdx(); startTurn(); } else draw();
+    if (u.hand.length <= 5) { stopTurnTimer(); phase = "idle"; addLog("弃牌完成"); nextTurnIdx(); startTurn(); } else draw();
 }
 
-// ========== AI ==========
+// ========== AI（重构为顺序行动队列） ==========
 function aiTurn(u) {
     if (u.hp <= 0) { endTurn(); return; }
     phase = "ai";
@@ -797,49 +1028,71 @@ function aiTurn(u) {
     let hasTruce = u.effects.some(e => e.type === "truce");
     let range = getRange(u);
 
-    setTimeout(() => {
-        if (!hasTruce) {
+    let actions = [];
+
+    if (!hasTruce) {
+        actions.push(() => {
             let torchCard = u.hand.find(c => c.id === "torch");
             let hasSword = u.hand.some(c => c.id === "iron_sword");
             if (torchCard && hasSword && !u.torchBoosted && Math.random() < 0.5) {
                 removeCard(u, torchCard); u.torchBoosted = true;
-                addLog(`🔥 ${u.name}将火炬融入铁剑，攻击伤害+1000！`); draw();
+                addLog(`🔥 ${u.name}将火炬融入铁剑，攻击伤害+1000！`);
             }
+        });
+
+        actions.push(() => {
+            let curEnemies = alive(u.team === "friend" ? "enemy" : "friend");
             let atkCard = u.hand.find(c => c.id === "iron_sword");
             if (atkCard) {
-                let target = enemies.find(e => Math.abs(e.row-u.row)+Math.abs(e.col-u.col) <= range);
+                let target = curEnemies.find(e => Math.abs(e.row-u.row)+Math.abs(e.col-u.col) <= range);
                 if (target) {
                     removeCard(u, atkCard);
                     let ad = atkCard.dmg, an = atkCard.name;
                     if (u.torchBoosted) { ad += 1000; an = "烈焰铁剑"; u.torchBoosted = false; }
-                    resolveAttack(u, target, ad, an); draw();
+                    resolveAttack(u, target, ad, an);
                 }
             }
+        });
+
+        actions.push(() => {
+            let curEnemies = alive(u.team === "friend" ? "enemy" : "friend");
             let dmgCard = u.hand.find(c => c.cat === "dmg");
-            if (dmgCard) {
-                if (dmgCard.id === "sword_rain") { removeCard(u, dmgCard); enemies.forEach(e => resolveAttack(u, e, dmgCard.dmg, dmgCard.name)); }
-                else if (dmgCard.id === "torch" && enemies.length > 0) { let t = enemies[0]; throwTorchAt(u, dmgCard, t.row, t.col); }
-                draw();
+            if (!dmgCard) return;
+            if (dmgCard.id === "sword_rain") {
+                removeCard(u, dmgCard);
+                let targets = [...curEnemies];
+                let subActions = targets.map(t => () => {
+                    if (t.hp > 0) resolveAttack(u, t, dmgCard.dmg, dmgCard.name);
+                });
+                aiActionQueue.unshift(...subActions);
+            } else if (dmgCard.id === "torch" && curEnemies.length > 0) {
+                let t = curEnemies[0];
+                throwTorchAt(u, dmgCard, t.row, t.col);
             }
+        });
+
+        actions.push(() => {
+            let curEnemies = alive(u.team === "friend" ? "enemy" : "friend");
             let ctrlCard = u.hand.find(c => c.cat === "ctrl" && c.id !== "barricade" && c.id !== "truce");
-            if (ctrlCard && enemies.length > 0) {
-                let inRange = enemies.filter(e => Math.abs(e.row-u.row)+Math.abs(e.col-u.col) <= range);
+            if (ctrlCard && curEnemies.length > 0) {
+                let inRange = curEnemies.filter(e => Math.abs(e.row-u.row)+Math.abs(e.col-u.col) <= range);
                 if (inRange.length > 0) {
                     let t = inRange[Math.floor(Math.random()*inRange.length)];
-                    removeCard(u, ctrlCard); resolveControl(u, t, ctrlCard.id, ctrlCard.name, ""); draw();
+                    removeCard(u, ctrlCard);
+                    resolveControl(u, t, ctrlCard.id, ctrlCard.name, "");
                 }
             }
-        }
-        // 补给箱：手牌少于2张时使用
+        });
+    }
+
+    actions.push(() => {
         let supplyCard = u.hand.find(c => c.id === "supply");
         if (supplyCard && u.hand.length <= 2) {
             removeCard(u, supplyCard);
             drawFromPile(u, supplyCard.draw);
             addLog(`${u.name}使用补给箱，抽了${supplyCard.draw}张牌`);
-            draw();
         }
-        // 休战令：己方血量普遍较低且敌方手牌多时使用
-        if (!hasTruce) {
+        if (!u.effects.some(e => e.type === "truce")) {
             let truceCard = u.hand.find(c => c.id === "truce");
             if (truceCard) {
                 let myTeamHp = alive(u.team).reduce((s, x) => s + x.hp / x.maxHp, 0) / Math.max(alive(u.team).length, 1);
@@ -847,11 +1100,9 @@ function aiTurn(u) {
                     removeCard(u, truceCard);
                     units.forEach(x => x.effects.push({ type: "truce", turns: 1 }));
                     addLog(`${u.name}使用休战令！全场无法使用负面牌，持续1回合`);
-                    draw();
                 }
             }
         }
-
         if (u.hp < u.maxHp * 0.7) {
             let hc = u.hand.find(c => c.id === "heal_card");
             if (hc) { removeCard(u, hc); u.hp = Math.min(u.maxHp, u.hp + hc.heal); addLog(`${u.name}恢复了${hc.heal}HP`); }
@@ -860,11 +1111,10 @@ function aiTurn(u) {
         if (sc && u.shield < 1000) { removeCard(u, sc); u.shield += sc.shieldVal; addLog(`${u.name}获得${sc.shieldVal}护盾`); }
         let ec = u.hand.find(c => c.cat === "equip");
         if (ec && u.equips.length < 3) { removeCard(u, ec); u.equips.push(ec); addLog(`${u.name}装备了${ec.name}`); }
-        draw();
-        if (!document.getElementById("defendModal").classList.contains("hidden")) return;
-        if (!document.getElementById("controlModal").classList.contains("hidden")) return;
-        setTimeout(endTurn, 400);
-    }, 500);
+    });
+
+    aiActionQueue = actions;
+    setTimeout(() => executeNextAIAction(u), 500);
 }
 
 // ========== 队友手牌弹窗 ==========
